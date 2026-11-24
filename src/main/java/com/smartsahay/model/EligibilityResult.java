@@ -12,6 +12,9 @@ public class EligibilityResult {
     private String disclaimer = "Results are indicative only, not an official eligibility decision. "
             + "Please confirm with the official scheme portal or your local agriculture office.";
 
+    public int getEligibleCount() { return eligibleCount; }
+    public List<Scheme> getEligible() { return eligible; }
+
     public void addEligible(Scheme scheme) {
         eligible.add(scheme);
         eligibleCount = eligible.size();

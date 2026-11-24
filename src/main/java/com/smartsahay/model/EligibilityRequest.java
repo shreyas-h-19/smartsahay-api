@@ -17,6 +17,19 @@ public class EligibilityRequest {
     private String category;
     private String crop;
 
+    /** Used by the IVR module, which builds a request from keypad answers instead of JSON. */
+    public static EligibilityRequest of(double landAcres, long annualIncome, int age,
+                                        String state, String category, String crop) {
+        EligibilityRequest r = new EligibilityRequest();
+        r.landAcres = landAcres;
+        r.annualIncome = annualIncome;
+        r.age = age;
+        r.state = state;
+        r.category = category;
+        r.crop = crop;
+        return r;
+    }
+
     public Long getAnnualIncome() { return annualIncome; }
     public Integer getAge() { return age; }
     public String getState() { return state; }

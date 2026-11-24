@@ -7,6 +7,7 @@ import Home         from './pages/Home';
 import Schemes      from './pages/Schemes';
 import SchemeDetail from './pages/SchemeDetail';
 import Eligibility  from './pages/Eligibility';
+import IvrDemo      from './pages/IvrDemo';
 import AdminLogin   from './pages/admin/AdminLogin';
 import AdminDashboard from './pages/admin/AdminDashboard';
 import SchemeForm   from './pages/admin/SchemeForm';
@@ -26,6 +27,7 @@ function AppLayout() {
           <Route path="/schemes"    element={<Schemes />} />
           <Route path="/schemes/:slug" element={<SchemeDetail />} />
           <Route path="/eligibility"   element={<Eligibility />} />
+          <Route path="/ivr"           element={<IvrDemo />} />
           <Route path="/admin/login"   element={<AdminLogin />} />
 
           <Route path="/admin" element={

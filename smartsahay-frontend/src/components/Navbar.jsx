@@ -37,6 +37,11 @@ export default function Navbar() {
                         {t('checkEligibility')}
                     </NavLink>
                 </li>
+                <li>
+                    <NavLink to="/ivr" className={({ isActive }) => isActive ? 'active' : ''}>
+                        Voice Demo
+                    </NavLink>
+                </li>
                 {isAdmin ? (
                     <>
                         <li>
