@@ -5,7 +5,9 @@ import com.smartsahay.model.EligibilityResult;
 import com.smartsahay.model.Scheme;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Pure logic for the simulated IVR (keypad + voice demo).
@@ -22,12 +24,17 @@ public class IvrService {
     public static final int PAGE_SIZE = 8;
 
     private static final String[] CATEGORIES = {"GENERAL", "SC", "ST", "OBC", "MINORITY"};
+    private static final String[] CATEGORY_LABELS = {"General", "SC", "ST", "OBC", "Minority"};
 
     /** Income bracket 1..5 -> upper bound in rupees (bracket 5 = "above 8 lakh", sent as 10 lakh). */
     private static final long[] INCOME_UPPER = {100_000, 300_000, 600_000, 800_000, 1_000_000};
+    private static final String[] INCOME_LABELS = {
+            "Up to ₹1 Lakh", "₹1–3 Lakh", "₹3–6 Lakh", "₹6–8 Lakh", "Above ₹8 Lakh"
+    };
 
     /** Crop key 1..4 -> crop text. 4 ("Other") sends no crop. */
     private static final String[] CROPS = {"KHARIF", "RABI", "MILLET", null};
+    private static final String[] CROP_LABELS = {"Kharif", "Rabi", "Millets", "Other"};
 
     private static final int MAX_SPOKEN_CHARS = 450;
 
@@ -60,6 +67,70 @@ public class IvrService {
             this.income = income;
             this.crop = crop;
         }
+    }
+
+    // ── Dashboard DTOs ──────────────────────────────────────────────────────
+
+    public static class SchemeSummary {
+        private final int id;
+        private final String name;
+        private final String level;
+        private final String benefit;
+        private final String whereToApply;
+        private final boolean spoken;
+
+        public SchemeSummary(int id, String name, String level, String benefit, String whereToApply, boolean spoken) {
+            this.id = id;
+            this.name = name;
+            this.level = level;
+            this.benefit = benefit;
+            this.whereToApply = whereToApply;
+            this.spoken = spoken;
+        }
+
+        public int getId() { return id; }
+        public String getName() { return name; }
+        public String getLevel() { return level; }
+        public String getBenefit() { return benefit; }
+        public String getWhereToApply() { return whereToApply; }
+        public boolean isSpoken() { return spoken; }
+    }
+
+    public SchemeSummary summarizeScheme(Scheme s, boolean spoken) {
+        if (s == null) return null;
+        String benefit = (s.getBenefits() != null && !s.getBenefits().isEmpty())
+                ? s.getBenefits().get(0)
+                : (s.getDescription() != null ? s.getDescription() : "");
+        return new SchemeSummary(
+                s.getId(),
+                s.getName(),
+                s.getLevel(),
+                benefit,
+                s.getWhereToApply() != null ? s.getWhereToApply() : "",
+                spoken
+        );
+    }
+
+    public List<SchemeSummary> summarizeEligibility(EligibilityResult result) {
+        List<SchemeSummary> out = new ArrayList<>();
+        if (result == null || result.getEligible() == null) return out;
+        List<Scheme> eligible = result.getEligible();
+        for (int i = 0; i < eligible.size(); i++) {
+            out.add(summarizeScheme(eligible.get(i), i < 3));
+        }
+        return out;
+    }
+
+    public Map<String, String> formatAnswers(Answers a) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (a == null) return map;
+        if (in(a.state, 1, 2)) map.put("State", a.state == 1 ? "Karnataka" : "Other");
+        if (in(a.age, 1, 120)) map.put("Age", a.age + " yrs");
+        if (in(a.category, 1, 5)) map.put("Category", CATEGORY_LABELS[a.category - 1]);
+        if (in(a.acres, 0, 500)) map.put("Land", a.acres == 0 ? "No land" : a.acres + " acres");
+        if (in(a.income, 1, 5)) map.put("Income", INCOME_LABELS[a.income - 1]);
+        if (in(a.crop, 1, 4)) map.put("Crop", CROP_LABELS[a.crop - 1]);
+        return map;
     }
 
     // ── Mode 1: scheme information (two-level, database-driven menu) ─────────

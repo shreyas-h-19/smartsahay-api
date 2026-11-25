@@ -17,6 +17,7 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -25,13 +26,8 @@ import java.util.Map;
  *
  *   GET  /api/ivr/menu                              main menu (1 = Central, 2 = Karnataka state)
  *   GET  /api/ivr/menu?group=1&page=0               schemes of a group, 8 per page (9 = more, 0 = back)
- *   GET  /api/ivr/scheme?group=1&page=0&digits=3    spoken summary of one scheme
- *   POST /api/ivr/eligibility                       JSON body of keypad answers -> spoken result
- *
- * All return {"gather_prompt":{"text":"..."},"max_input_digits":1}; menus also return "level" ("main" or "list") and "options":[{key,label}].
- * The menu is built from the schemes table on each request, so adding a scheme needs no code change.
- * Eligibility uses POST so a farmer's answers never appear in URLs or access logs.
- * Nothing about the farmer is stored or logged.
+ *   GET  /api/ivr/scheme?group=1&page=0&digits=3    spoken summary of one scheme + structured card data
+ *   POST /api/ivr/eligibility                       JSON body of keypad answers -> spoken result + matched list
  */
 @WebServlet("/api/ivr/*")
 public class IvrServlet extends HttpServlet {
@@ -49,7 +45,6 @@ public class IvrServlet extends HttpServlet {
             return;
         }
         try {
-            // The menu is built from the database on every call, so keys always match the real schemes.
             List<Scheme> all = schemeDao.findAll(null, null, null);
             if ("/menu".equals(path)) {
                 menu(req, resp, all);
@@ -62,8 +57,6 @@ public class IvrServlet extends HttpServlet {
         }
     }
 
-    /** GET /api/ivr/menu              -> main menu (Central / State)
-     *  GET /api/ivr/menu?group=1&page=0 -> one page of that group's schemes */
     private void menu(HttpServletRequest req, HttpServletResponse resp, List<Scheme> all) throws IOException {
         if (req.getParameter("group") == null) {
             speak(resp, ivr.mainMenu(all));
@@ -79,7 +72,6 @@ public class IvrServlet extends HttpServlet {
         speak(resp, sub);
     }
 
-    /** GET /api/ivr/scheme?group=1&page=0&digits=3 -> spoken summary of the 3rd scheme on that page */
     private void scheme(HttpServletRequest req, HttpServletResponse resp, List<Scheme> all)
             throws IOException, SQLException {
         Scheme picked = ivr.pick(all, intParam(req, "group", -1), intParam(req, "page", 0), req.getParameter("digits"));
@@ -87,8 +79,15 @@ public class IvrServlet extends HttpServlet {
             speak(resp, ivr.invalidKeySpeech());
             return;
         }
-        Scheme detail = schemeDao.findBySlug(picked.getSlug());   // loads benefits
-        speak(resp, detail == null ? ivr.schemeNotFoundSpeech() : ivr.schemeSpeech(detail));
+        Scheme detail = schemeDao.findBySlug(picked.getSlug());
+        if (detail == null) {
+            speak(resp, ivr.schemeNotFoundSpeech());
+            return;
+        }
+
+        Map<String, Object> payload = basePayload(ivr.schemeSpeech(detail), "SCHEME_INFO");
+        payload.put("scheme", ivr.summarizeScheme(detail, true));
+        JsonUtil.send(resp, 200, payload);
     }
 
     private static int intParam(HttpServletRequest req, String name, int fallback) {
@@ -123,24 +122,33 @@ public class IvrServlet extends HttpServlet {
             List<Scheme> schemes = schemeDao.findAll(null, null, null);
             Map<Integer, SchemeRule> rules = ruleDao.findAll();
             EligibilityResult result = eligibilityService.check(request, schemes, rules);
-            speak(resp, ivr.eligibilitySpeech(result));
+
+            Map<String, Object> payload = basePayload(ivr.eligibilitySpeech(result), "ELIGIBILITY_RESULTS");
+            payload.put("results", ivr.summarizeEligibility(result));
+            payload.put("farmer_inputs", ivr.formatAnswers(answers));
+            JsonUtil.send(resp, 200, payload);
         } catch (SQLException e) {
             getServletContext().log("IVR eligibility failed", e);
             JsonUtil.error(resp, 500, "Internal server error");
         }
     }
 
+    private Map<String, Object> basePayload(String text, String mode) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("gather_prompt", Map.of("text", text));
+        map.put("max_input_digits", 1);
+        map.put("mode", mode);
+        return map;
+    }
+
     private void speak(HttpServletResponse resp, String text) throws IOException {
-        JsonUtil.send(resp, 200, Map.of(
-                "gather_prompt", Map.of("text", text),
-                "max_input_digits", 1));
+        JsonUtil.send(resp, 200, basePayload(text, "MENU"));
     }
 
     private void speak(HttpServletResponse resp, IvrService.Menu menu) throws IOException {
-        JsonUtil.send(resp, 200, Map.of(
-                "gather_prompt", Map.of("text", menu.getText()),
-                "max_input_digits", 1,
-                "level", menu.getLevel(),
-                "options", menu.getOptions()));
+        Map<String, Object> payload = basePayload(menu.getText(), "MENU");
+        payload.put("level", menu.getLevel());
+        payload.put("options", menu.getOptions());
+        JsonUtil.send(resp, 200, payload);
     }
 }

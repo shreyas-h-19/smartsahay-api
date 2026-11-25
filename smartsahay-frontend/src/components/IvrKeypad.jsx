@@ -1,20 +1,10 @@
 import { useEffect, useState } from 'react';
 import './IvrKeypad.css';
+import './IvrDashboard.css';
 
 /**
  * Simulated IVR: an on-screen phone keypad that speaks prompts with the browser's
- * speechSynthesis and calls the SmartSahay backend.
- *
- * Props
- *   apiBase    backend base URL, e.g. "http://localhost:8080/smartsahay" ('' = same origin / dev proxy)
- *   askExtra   true  -> also ask FRUITS ID and Aadhaar-linked bank (8 questions)
- *              false -> only the 6 questions the backend's rules use
- *
- * Scheme-information mode is a two-level menu that the backend builds from the database:
- *   main menu (1 Central, 2 Karnataka state) -> schemes of that group, 8 per page (9 = more, 0 = back) -> summary.
- * The page keeps no list of schemes itself, so it cannot disagree with the backend.
- *
- * This is a demo mode. It is not a telephone service and needs no phone network.
+ * speechSynthesis and displays a synchronized live dashboard beside the keypad.
  */
 
 const range = (min, max) => (d) => d !== '' && Number(d) >= min && Number(d) <= max;
@@ -46,17 +36,6 @@ function buildQuestions(askExtra) {
   return qs;
 }
 
-function speak(text) {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  const voices = window.speechSynthesis.getVoices();
-  const voice = voices.find((v) => v.lang === 'en-IN') || voices.find((v) => v.lang.startsWith('en'));
-  if (voice) u.voice = voice;
-  u.lang = voice ? voice.lang : 'en-IN';
-  window.speechSynthesis.speak(u);
-}
-
 export default function IvrKeypad({ apiBase = '', askExtra = false }) {
   const questions = buildQuestions(askExtra);
 
@@ -67,25 +46,77 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
   const [buffer, setBuffer] = useState('');
   const [answers, setAnswers] = useState({});
   const [log, setLog] = useState([]);
-  // Scheme-information menu state (the lists themselves always come from the server)
+
+  // Scheme-information menu state
   const [group, setGroup] = useState(null);         // null = main menu, 1 = Central, 2 = Karnataka state
   const [page, setPage] = useState(0);
   const [options, setOptions] = useState([]);       // [{key, label}] for the menu on screen
   const [menuText, setMenuText] = useState('');     // spoken text of the current menu, for repeating
 
-  function say(text) {
-    setLog((l) => [...l, text]);
-    speak(text);
+  // Live Dashboard state
+  const [spokenText, setSpokenText] = useState('');
+  const [charIndex, setCharIndex] = useState(-1);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [dashMode, setDashMode] = useState('MENU'); // 'MENU' | 'SCHEME_INFO' | 'ELIGIBILITY_RESULTS'
+  const [activeScheme, setActiveScheme] = useState(null);
+  const [matchedSchemes, setMatchedSchemes] = useState([]);
+  const [farmerInputs, setFarmerInputs] = useState({});
+
+  function speakSynced(text) {
+    setSpokenText(text);
+    setCharIndex(-1);
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    if (!text) {
+      setIsSpeaking(false);
+      return;
+    }
+
+    const u = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang === 'en-IN') || voices.find((v) => v.lang.startsWith('en'));
+    if (voice) u.voice = voice;
+    u.lang = voice ? voice.lang : 'en-IN';
+
+    u.onstart = () => setIsSpeaking(true);
+    u.onboundary = (e) => {
+      if (e.name === 'word') setCharIndex(e.charIndex);
+    };
+    u.onend = () => {
+      setIsSpeaking(false);
+      setCharIndex(-1);
+    };
+    u.onerror = () => {
+      setIsSpeaking(false);
+      setCharIndex(-1);
+    };
+
+    window.speechSynthesis.speak(u);
   }
 
-  // Returns { text, options } (options is null for plain answers). Never throws.
+  function say(text) {
+    setLog((l) => [...l, text]);
+    speakSynced(text);
+  }
+
+  // Returns { text, options, level, mode, scheme, results, farmer_inputs }. Never throws.
   async function callApi(path, init) {
     setBusy(true);
     try {
       const res = await fetch(`${apiBase}${path}`, init);
       const data = await res.json().catch(() => null);
-      if (!res.ok) return { text: 'Sorry, the service is not available right now. Please try again later.', options: null };
-      return { text: data?.gather_prompt?.text || 'Sorry, something went wrong.', options: data?.options || null, level: data?.level || null };
+      if (!res.ok) {
+        return { text: 'Sorry, the service is not available right now. Please try again later.', options: null };
+      }
+      return {
+        text: data?.gather_prompt?.text || 'Sorry, something went wrong.',
+        options: data?.options || null,
+        level: data?.level || null,
+        dashMode: data?.mode || 'MENU',
+        scheme: data?.scheme || null,
+        results: data?.results || [],
+        farmerInputs: data?.farmer_inputs || {},
+      };
     } catch {
       return { text: 'Sorry, I could not reach the Smart Sahay server.', options: null };
     } finally {
@@ -97,8 +128,9 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
   async function loadMenu(nextGroup, nextPage) {
     const query = nextGroup == null ? '' : `?group=${nextGroup}&page=${nextPage}`;
     const r = await callApi(`/api/ivr/menu${query}`);
+    setDashMode('MENU');
+    setActiveScheme(null);
     if (r.options) {
-      // The server says which level it sent, so a fallback to the main menu is followed automatically.
       const isMain = r.level !== 'list';
       setGroup(isMain ? null : nextGroup);
       setPage(isMain ? 0 : nextPage);
@@ -117,6 +149,10 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
     setGroup(null);
     setPage(0);
     setOptions([]);
+    setDashMode('MENU');
+    setActiveScheme(null);
+    setMatchedSchemes([]);
+    setFarmerInputs({});
     if (mode === 'scheme') {
       loadMenu(null, 0);
     } else {
@@ -125,7 +161,9 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
   }
 
   function endCall() {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+    setCharIndex(-1);
     setInCall(false);
     setBuffer('');
   }
@@ -141,6 +179,10 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
       if (k === '9' && offered) { await loadMenu(group, page + 1); return; }
       if (offered) {
         const r = await callApi(`/api/ivr/scheme?group=${group}&page=${page}&digits=${k}`);
+        if (r.scheme) {
+          setDashMode('SCHEME_INFO');
+          setActiveScheme(r.scheme);
+        }
         say(r.text);
         return;
       }
@@ -169,6 +211,9 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(next),
     });
+    setDashMode('ELIGIBILITY_RESULTS');
+    setMatchedSchemes(r.results || []);
+    setFarmerInputs(r.farmerInputs || {});
     say(r.text + ' Thank you for calling Smart Sahay. Goodbye.');
     setInCall(false);
   }
@@ -206,64 +251,169 @@ export default function IvrKeypad({ apiBase = '', askExtra = false }) {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
   }, []);
 
+  function renderHighlightedSpeech() {
+    if (!spokenText) {
+      return <span className="dash-muted">Press Call to start listening and see live captions here.</span>;
+    }
+    if (!isSpeaking || charIndex < 0) {
+      return <span className={isSpeaking ? 'dash-sentence-active' : ''}>{spokenText}</span>;
+    }
+    const before = spokenText.slice(0, charIndex);
+    const rest = spokenText.slice(charIndex);
+    const match = rest.match(/^(\S+)([\s\S]*)/);
+    if (!match) return <span>{spokenText}</span>;
+
+    return (
+      <>
+        <span>{before}</span>
+        <mark className="dash-word-active">{match[1]}</mark>
+        <span>{match[2]}</span>
+      </>
+    );
+  }
+
   const lastPrompt = log.length ? log[log.length - 1] : 'Choose a mode and press Call.';
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
 
   return (
-    <div className="ivr">
-      <div className="ivr-modes" role="radiogroup" aria-label="IVR mode">
-        <button type="button" role="radio" aria-checked={mode === 'scheme'} disabled={inCall}
-                className={mode === 'scheme' ? 'ivr-mode active' : 'ivr-mode'}
-                onClick={() => setMode('scheme')}>Scheme information</button>
-        <button type="button" role="radio" aria-checked={mode === 'eligibility'} disabled={inCall}
-                className={mode === 'eligibility' ? 'ivr-mode active' : 'ivr-mode'}
-                onClick={() => setMode('eligibility')}>Check eligibility</button>
-      </div>
-
-      <div className="ivr-phone">
-        <div className="ivr-screen" aria-live="polite">
-          <p className="ivr-prompt">{lastPrompt}</p>
-          {inCall && mode === 'eligibility' && questions[step]?.multi && (
-            <p className="ivr-buffer">Typing: {buffer || '…'} (press # to confirm, * to clear)</p>
-          )}
-          {inCall && mode === 'eligibility' && (
-            <p className="ivr-step">Question {step + 1} of {questions.length}</p>
-          )}
-          {busy && <p className="ivr-step">Please wait…</p>}
+    <div className="ivr-workspace">
+      {/* LEFT COLUMN: Existing IVR Phone Keypad */}
+      <div className="ivr">
+        <div className="ivr-modes" role="radiogroup" aria-label="IVR mode">
+          <button type="button" role="radio" aria-checked={mode === 'scheme'} disabled={inCall}
+                  className={mode === 'scheme' ? 'ivr-mode active' : 'ivr-mode'}
+                  onClick={() => setMode('scheme')}>Scheme information</button>
+          <button type="button" role="radio" aria-checked={mode === 'eligibility'} disabled={inCall}
+                  className={mode === 'eligibility' ? 'ivr-mode active' : 'ivr-mode'}
+                  onClick={() => setMode('eligibility')}>Check eligibility</button>
         </div>
 
-        {mode === 'scheme' && inCall && options.length > 0 && (
-          <ul className="ivr-menu">
-            {options.map((o) => <li key={o.key}><strong>{o.key}</strong> {o.label}</li>)}
-            <li><strong>0</strong> {group == null ? 'Repeat this menu' : 'Main menu'}</li>
-          </ul>
+        <div className="ivr-phone">
+          <div className="ivr-screen" aria-live="polite">
+            <p className="ivr-prompt">{lastPrompt}</p>
+            {inCall && mode === 'eligibility' && questions[step]?.multi && (
+              <p className="ivr-buffer">Typing: {buffer || '…'} (press # to confirm, * to clear)</p>
+            )}
+            {inCall && mode === 'eligibility' && (
+              <p className="ivr-step">Question {step + 1} of {questions.length}</p>
+            )}
+            {busy && <p className="ivr-step">Please wait…</p>}
+          </div>
+
+          {mode === 'scheme' && inCall && options.length > 0 && (
+            <ul className="ivr-menu">
+              {options.map((o) => <li key={o.key}><strong>{o.key}</strong> {o.label}</li>)}
+              <li><strong>0</strong> {group == null ? 'Repeat this menu' : 'Main menu'}</li>
+            </ul>
+          )}
+
+          <div className="ivr-keys">
+            {keys.map((k) => (
+              <button type="button" key={k} className="ivr-key" disabled={!inCall || busy}
+                      onClick={() => press(k)} aria-label={`Key ${k}`}>{k}</button>
+            ))}
+          </div>
+
+          <div className="ivr-actions">
+            {!inCall
+              ? <button type="button" className="ivr-call" onClick={startCall}>📞 Call</button>
+              : <button type="button" className="ivr-end" onClick={endCall}>End call</button>}
+          </div>
+        </div>
+
+        {log.length > 1 && (
+          <details className="ivr-log">
+            <summary>Call transcript</summary>
+            <ol>{log.map((t, i) => <li key={i}>{t}</li>)}</ol>
+          </details>
         )}
 
-        <div className="ivr-keys">
-          {keys.map((k) => (
-            <button type="button" key={k} className="ivr-key" disabled={!inCall || busy}
-                    onClick={() => press(k)} aria-label={`Key ${k}`}>{k}</button>
-          ))}
-        </div>
-
-        <div className="ivr-actions">
-          {!inCall
-            ? <button type="button" className="ivr-call" onClick={startCall}>📞 Call</button>
-            : <button type="button" className="ivr-end" onClick={endCall}>End call</button>}
-        </div>
+        <p className="ivr-note">
+          Demo mode: this simulates a phone helpline in your browser. It is not a real phone number.
+          Results are indicative only; please confirm with your local agriculture office.
+        </p>
       </div>
 
-      {log.length > 1 && (
-        <details className="ivr-log">
-          <summary>Call transcript</summary>
-          <ol>{log.map((t, i) => <li key={i}>{t}</li>)}</ol>
-        </details>
-      )}
+      {/* RIGHT COLUMN: Live Synchronized Dashboard */}
+      <aside className="ivr-dashboard" aria-label="Live IVR display">
+        {/* Panel 1: Now Speaking */}
+        <section className="dash-card">
+          <div className="dash-card-head">
+            <div className="dash-title-row">
+              <span className={`dash-pulse ${isSpeaking ? 'speaking' : ''}`} />
+              <h3>Now speaking</h3>
+            </div>
+            {spokenText && (
+              <button type="button" className="dash-replay" onClick={() => speakSynced(spokenText)}>
+                🔊 Repeat
+              </button>
+            )}
+          </div>
+          <p className="dash-caption">{renderHighlightedSpeech()}</p>
+        </section>
 
-      <p className="ivr-note">
-        Demo mode: this simulates a phone helpline in your browser. It is not a real phone number.
-        Results are indicative only; please confirm with your local agriculture office.
-      </p>
+        {/* Panel 2: Scheme Information Card */}
+        {dashMode === 'SCHEME_INFO' && activeScheme && (
+          <section className="dash-card dash-scheme-card">
+            <div className="dash-scheme-top">
+              <h3>{activeScheme.name}</h3>
+              <span className={`dash-badge ${activeScheme.level?.toLowerCase() === 'central' ? 'central' : 'state'}`}>
+                {activeScheme.level} Scheme
+              </span>
+            </div>
+            <div className="dash-scheme-details">
+              <p><strong>Key Benefit:</strong> {activeScheme.benefit || 'Details available at agriculture office.'}</p>
+              {activeScheme.whereToApply && (
+                <p><strong>Where to Apply:</strong> {activeScheme.whereToApply}</p>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Panel 3: Eligibility Results & Farmer Inputs */}
+        {dashMode === 'ELIGIBILITY_RESULTS' && (
+          <section className="dash-card">
+            <h3>Eligibility Results</h3>
+
+            {Object.keys(farmerInputs).length > 0 && (
+              <div className="dash-inputs">
+                <span className="dash-inputs-label">Entered farmer details:</span>
+                <div className="dash-chips">
+                  {Object.entries(farmerInputs).map(([k, v]) => (
+                    <span key={k} className="dash-chip">{k}: <strong>{v}</strong></span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {matchedSchemes.length === 0 ? (
+              <p className="dash-muted">No matching schemes found for the entered criteria.</p>
+            ) : (
+              <div className="dash-results-list">
+                <p className="dash-results-count">
+                  Found <strong>{matchedSchemes.length}</strong> eligible {matchedSchemes.length === 1 ? 'scheme' : 'schemes'}
+                  {matchedSchemes.length > 3 ? ' (top 3 read aloud):' : ':'}
+                </p>
+                {matchedSchemes.map((s, idx) => (
+                  <div key={s.id || idx} className={`dash-result-item ${s.spoken ? 'spoken' : ''}`}>
+                    <div className="dash-result-top">
+                      <strong>{s.name}</strong>
+                      <div className="dash-badges">
+                        <span className={`dash-badge ${s.level?.toLowerCase() === 'central' ? 'central' : 'state'}`}>
+                          {s.level}
+                        </span>
+                        {s.spoken && <span className="dash-badge-spoken">🔊 Spoken</span>}
+                      </div>
+                    </div>
+                    {s.benefit && <p className="dash-result-benefit">{s.benefit}</p>}
+                    {s.whereToApply && <small className="dash-result-apply">Apply at: {s.whereToApply}</small>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+      </aside>
     </div>
   );
 }
